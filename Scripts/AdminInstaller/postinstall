@@ -1,0 +1,25 @@
+#!/bin/zsh
+set -euo pipefail
+
+MHK_SUPPORT="/Library/Application Support/MemoryHogKiller"
+MHK_LABEL="local.memoryhogkiller.helper"
+MHK_TRUST="$MHK_SUPPORT/Trust.plist"
+MHK_INSTALL_UID="$(/usr/bin/stat -f '%u' /dev/console)"
+case "$MHK_INSTALL_UID" in
+    ''|*[!0-9]*) echo "Could not identify the signed-in user." >&2; exit 1 ;;
+esac
+if (( MHK_INSTALL_UID < 501 )); then
+    echo "Install while signed in to the account that will run Hogtied." >&2
+    exit 1
+fi
+
+/usr/libexec/PlistBuddy -c "Set :AllowedUserID $MHK_INSTALL_UID" "$MHK_TRUST"
+/usr/sbin/chown root:wheel "$MHK_SUPPORT" "$MHK_TRUST" "$MHK_SUPPORT/Uninstall Admin Helper.command" "/Library/PrivilegedHelperTools/$MHK_LABEL" "/Library/LaunchDaemons/$MHK_LABEL.plist"
+/bin/chmod 755 "$MHK_SUPPORT" "$MHK_SUPPORT/Uninstall Admin Helper.command" "/Library/PrivilegedHelperTools/$MHK_LABEL"
+/bin/chmod 644 "$MHK_TRUST" "/Library/LaunchDaemons/$MHK_LABEL.plist"
+
+# Stop an earlier helper before loading this signed version. A disabled
+# launchd job is left disabled; the installer never overrides that choice.
+/bin/launchctl bootout "system/$MHK_LABEL" 2>/dev/null || true
+/bin/launchctl bootstrap system "/Library/LaunchDaemons/$MHK_LABEL.plist"
+echo "Installed the optional helper for user ID $MHK_INSTALL_UID. Enable it in Hogtied Settings."

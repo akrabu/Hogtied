@@ -1,0 +1,26 @@
+name: macOS build and checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Policy and native integration checks
+        run: ./Scripts/test.sh
+      - name: Build app and matching administrator installer
+        run: |
+          ./Scripts/build.sh dist
+          ./Scripts/package-admin.sh dist/Hogtied.app dist
+          ditto -c -k --sequesterRsrc --keepParent dist/Hogtied.app dist/Hogtied.zip
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: Hogtied-macos
+          path: |
+            dist/Hogtied.zip
+            dist/Hogtied Admin Helper.pkg
+          if-no-files-found: error

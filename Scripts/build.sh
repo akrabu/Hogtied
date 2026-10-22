@@ -1,0 +1,22 @@
+#!/bin/zsh
+set -euo pipefail
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_DIR="${HOGTIED_BUILD_DIR:-${MHK_BUILD_DIR:-$PROJECT_DIR/.build}}"
+OUTPUT_DIR="${1:-$PROJECT_DIR/dist}"
+mkdir -p "$BUILD_DIR/module-cache" "$BUILD_DIR/cache" "$OUTPUT_DIR"
+export CLANG_MODULE_CACHE_PATH="$BUILD_DIR/module-cache"
+export SWIFTPM_MODULECACHE_OVERRIDE="$BUILD_DIR/module-cache"
+export XDG_CACHE_HOME="$BUILD_DIR/cache"
+swift build --package-path "$PROJECT_DIR" --scratch-path "$BUILD_DIR" --cache-path "$BUILD_DIR/cache" --disable-sandbox --build-system native --product Hogtied -c release
+BIN_DIR="$(swift build --package-path "$PROJECT_DIR" --scratch-path "$BUILD_DIR" --cache-path "$BUILD_DIR/cache" --disable-sandbox --build-system native -c release --show-bin-path)"
+swiftc -module-cache-path "$BUILD_DIR/module-cache" "$PROJECT_DIR/Sources/Hogtied/PigArtwork.swift" "$PROJECT_DIR/Scripts/GenerateIcon.swift" -o "$BUILD_DIR/generate-icon"
+"$BUILD_DIR/generate-icon" "$BUILD_DIR/AppIcon.iconset" "$PROJECT_DIR/Assets/Hogtied.png"
+APP_DIR="$OUTPUT_DIR/Hogtied.app"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+cp "$BIN_DIR/Hogtied" "$APP_DIR/Contents/MacOS/Hogtied"
+cp "$PROJECT_DIR/Assets/Info.plist" "$APP_DIR/Contents/Info.plist"
+cp "$BUILD_DIR/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+cp "$PROJECT_DIR/Assets/Hogtied.png" "$APP_DIR/Contents/Resources/Hogtied.png"
+codesign --force --sign - --options runtime --identifier local.memoryhogkiller.app "$APP_DIR"
+codesign --verify --strict "$APP_DIR"
+echo "Built $APP_DIR"
