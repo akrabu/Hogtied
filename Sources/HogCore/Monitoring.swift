@@ -42,12 +42,30 @@ public enum RecoveryOutcome: String, Codable, Sendable {
 }
 
 public enum RecoveryVerification {
-    public static func classify(_ sample: MemorySample, inventoryComplete: Bool, limitBytes: UInt64) -> RecoveryOutcome {
-        if sample.isMeasurable && sample.bytes > limitBytes { return .failed }
+    public static func classify(_ sample: MemorySample, inventoryComplete: Bool, limitBytes: UInt64,
+                                mode: QuitMode = .watchedGroup) -> RecoveryOutcome {
+        if sample.isMeasurable && sample.measuredBytes(mode: mode) > limitBytes { return .failed }
         if sample.isRunning {
             return inventoryComplete && sample.isMeasurable && sample.unavailableCount == 0 ? .recovered : .unavailable
         }
         return inventoryComplete ? .exited : .unavailable
+    }
+
+    public static func scope(_ sample: MemorySample, original: MemorySample, targets: MemorySample,
+                             mode: QuitMode) -> MemorySample {
+        guard mode == .offendingProcesses else { return sample }
+        let selected = Set(targets.processes.map(\.identity))
+        let existingSiblings = Set(original.processes.map(\.identity)).subtracting(selected)
+        // A pre-existing healthy sibling is not evidence that a signaled
+        // process restarted healthily. Follow its identity or new instances of
+        // the same executable during the verification window.
+        return sample.selecting(sample.processes.filter { process in
+            if selected.contains(process.identity) { return true }
+            guard !existingSiblings.contains(process.identity) else { return false }
+            return targets.processes.contains {
+                !$0.path.isEmpty ? $0.path == process.path : $0.name == process.name
+            }
+        })
     }
 }
 
@@ -73,7 +91,8 @@ public struct RetryState: Codable, Equatable, Sendable {
             resume(); events.append(.resumed)
         }
         guard !isPaused else { return events }
-        let outcome = RecoveryVerification.classify(sample, inventoryComplete: inventoryComplete, limitBytes: settings.limitBytes)
+        let outcome = RecoveryVerification.classify(sample, inventoryComplete: inventoryComplete,
+            limitBytes: settings.limitBytes, mode: settings.quitMode)
         if outcome == .recovered || (outcome == .exited && settlePending) {
             if failures > 0 || pendingRecovery { events.append(.recovered) }
             failures = 0; pendingRecovery = false; lastIssue = nil
@@ -123,7 +142,7 @@ public struct CheckReport: Codable, Sendable {
     public let activity: [ActivityEntry]
     public init(inventory: ProcessInventory, samples: [MemorySample], retries: [UUID: RetryState],
                 attempts: [QuitAttempt], activity: [ActivityEntry]) {
-        version = 2; self.inventory = inventory; self.samples = samples
+        version = 3; self.inventory = inventory; self.samples = samples
         self.retries = retries; self.attempts = attempts; self.activity = activity
     }
 }

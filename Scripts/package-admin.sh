@@ -35,5 +35,5 @@ pkgbuild --analyze --root "$PAYLOAD_DIR" "$STAGING_DIR/components.plist"
 # Always install the matching signed app into /Applications, even if a copy
 # is already running from Downloads or another build has the same version.
 /usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' -c 'Set :0:BundleIsVersionChecked false' "$STAGING_DIR/components.plist"
-pkgbuild --root "$PAYLOAD_DIR" --component-plist "$STAGING_DIR/components.plist" --scripts "$STAGING_DIR/scripts" --identifier local.memoryhogkiller.admin --version 1.2.0 --install-location / --ownership recommended "$OUTPUT_DIR/Hogtied Admin Helper.pkg"
+pkgbuild --root "$PAYLOAD_DIR" --component-plist "$STAGING_DIR/components.plist" --scripts "$STAGING_DIR/scripts" --identifier local.memoryhogkiller.admin --version 1.3.0 --install-location / --ownership recommended "$OUTPUT_DIR/Hogtied Admin Helper.pkg"
 echo "Built $OUTPUT_DIR/Hogtied Admin Helper.pkg"

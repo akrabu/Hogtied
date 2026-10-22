@@ -122,7 +122,7 @@ final class AppModel: ObservableObject {
         guard let rule = settings.rules.first(where: { $0.id == id }) else { return }
         retries[id] = RetryState()
         persist(retries, key: "retries.v1"); invalidatePolicy()
-        addActivity(ActivityEntry(app: rule.name, bytes: samples[id]?.bytes ?? 0,
+        addActivity(ActivityEntry(app: rule.name, bytes: samples[id]?.measuredBytes(mode: settings.quitMode) ?? 0,
             message: "Watcher resumed manually; attempt count reset. Eligible at the next check.",
             succeeded: true, kind: .resumed, ruleID: id))
         Task { await scan(enforce: false) }
@@ -259,7 +259,7 @@ final class AppModel: ObservableObject {
             if configuration.alertsEnabled {
                 for process in spikes.update(report.inventory, limitBytes: configuration.limitBytes) {
                     let entry = ActivityEntry(app: process.name, bytes: process.memoryBytes ?? 0,
-                        message: "Process exceeds the \(MemoryText.format(configuration.limitBytes)) limit. Alert only; add it to the watch list to allow automatic quitting.",
+                        message: "Process exceeds the \(MemoryText.format(configuration.limitBytes)) limit. This alert does not quit it; automatic quitting follows the watch list and quit mode.",
                         succeeded: true, kind: .alert, process: process, limitBytes: configuration.limitBytes)
                     addActivity(entry); notifications.deliver(entry, enabled: settings.alertsEnabled)
                 }

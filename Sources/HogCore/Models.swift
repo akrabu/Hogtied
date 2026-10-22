@@ -5,6 +5,10 @@ public enum TargetKind: String, Codable, Hashable, Sendable {
     case automatic, application, process
 }
 
+public enum QuitMode: String, Codable, Hashable, Sendable {
+    case watchedGroup, offendingProcesses
+}
+
 public struct WatchRule: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var name: String
@@ -56,6 +60,7 @@ public struct HogSettings: Codable, Equatable, Sendable {
     public var limitBytes: UInt64 = 1_000_000_000
     public var intervalSeconds: Double = 300
     public var includeHelpers = true
+    public var quitMode: QuitMode = .watchedGroup
     public var rules: [WatchRule] = []
     // Optional for compatibility with settings saved by version 1.0.
     public var useAdministratorHelper: Bool?
@@ -68,7 +73,7 @@ public struct HogSettings: Codable, Equatable, Sendable {
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case enabled, limitBytes, intervalSeconds, includeHelpers, rules, useAdministratorHelper
+        case enabled, limitBytes, intervalSeconds, includeHelpers, quitMode, rules, useAdministratorHelper
         case alertsEnabled, maximumAttempts, automaticallyResume, cooldownSeconds
     }
 
@@ -78,6 +83,7 @@ public struct HogSettings: Codable, Equatable, Sendable {
         limitBytes = try c.decodeIfPresent(UInt64.self, forKey: .limitBytes) ?? 1_000_000_000
         intervalSeconds = try c.decodeIfPresent(Double.self, forKey: .intervalSeconds) ?? 300
         includeHelpers = try c.decodeIfPresent(Bool.self, forKey: .includeHelpers) ?? true
+        quitMode = try c.decodeIfPresent(QuitMode.self, forKey: .quitMode) ?? .watchedGroup
         rules = try c.decodeIfPresent([WatchRule].self, forKey: .rules) ?? []
         useAdministratorHelper = try c.decodeIfPresent(Bool.self, forKey: .useAdministratorHelper)
         alertsEnabled = try c.decodeIfPresent(Bool.self, forKey: .alertsEnabled) ?? false
@@ -164,6 +170,8 @@ public struct MemorySample: Codable, Sendable {
     public let processes: [ProcessRecord]
     public let missingRoots: Int
     public var bytes: UInt64 { processes.compactMap(\.memoryBytes).reduce(0, +) }
+    public var maximumBytes: UInt64 { processes.compactMap(\.memoryBytes).max() ?? 0 }
+    public func measuredBytes(mode: QuitMode) -> UInt64 { mode == .offendingProcesses ? maximumBytes : bytes }
     public var unavailableCount: Int { processes.filter { $0.memoryBytes == nil }.count + missingRoots }
     public var isRunning: Bool { !roots.isEmpty || missingRoots > 0 }
     public var isMeasurable: Bool { !roots.isEmpty && processes.contains { $0.memoryBytes != nil } }
@@ -177,8 +185,21 @@ public struct MemorySample: Codable, Sendable {
         self.missingRoots = missingRoots
     }
 
-    public func shouldTerminate(enabled: Bool, limitBytes: UInt64) -> Bool {
-        enabled && isMeasurable && bytes > limitBytes
+    public func shouldTerminate(enabled: Bool, limitBytes: UInt64, mode: QuitMode = .watchedGroup) -> Bool {
+        enabled && isMeasurable && measuredBytes(mode: mode) > limitBytes
+    }
+
+    // Keep process selection separate from attribution. In individual mode a
+    // helper can be eligible without its parent being selected for termination.
+    public func selecting(_ selected: [ProcessRecord]) -> MemorySample {
+        let identities = Set(selected.map(\.identity))
+        let selectedRoots = roots.filter { identities.contains($0.identity) }
+        return MemorySample(ruleID: ruleID, roots: selectedRoots.isEmpty ? selected : selectedRoots,
+                            processes: selected)
+    }
+
+    public func terminationTargets(limitBytes: UInt64, mode: QuitMode) -> MemorySample {
+        selecting(mode == .offendingProcesses ? processes.filter { ($0.memoryBytes ?? 0) > limitBytes } : processes)
     }
 }
 

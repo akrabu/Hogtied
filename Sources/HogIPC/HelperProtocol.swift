@@ -9,7 +9,7 @@ public enum HelperConstants {
     public static let supportDirectory = "/Library/Application Support/MemoryHogKiller"
     public static let trustFile = supportDirectory + "/Trust.plist"
     public static let packageName = "Hogtied Admin Helper.pkg"
-    public static let protocolVersion = 2
+    public static let protocolVersion = 3
 }
 
 @objc public protocol HogHelperProtocol {
@@ -111,7 +111,7 @@ public final class HelperWorker: NSObject, HogHelperProtocol, @unchecked Sendabl
 
     public func invalidate() { lock.lock(); active = false; policy = nil; lock.unlock() }
 
-    public func ping(withReply reply: @escaping (String) -> Void) { reply("Hogtied helper 1.2.0 · protocol 2") }
+    public func ping(withReply reply: @escaping (String) -> Void) { reply("Hogtied helper 1.3.0 · protocol 3") }
 
     private func accept(_ value: HelperPolicy) -> Bool {
         guard value.isValid else { return false }

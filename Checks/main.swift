@@ -22,10 +22,12 @@ final class HogCoreChecks {
         var settings = HogSettings()
         XCTAssertEqual(settings.limitBytes, 1_000_000_000)
         XCTAssertEqual(settings.intervalSeconds, 300)
+        XCTAssertEqual(settings.quitMode, .watchedGroup)
         XCTAssertFalse(settings.enabled)
         settings.enabled = true
         settings.rules = [WatchRule(name: "Safari")]
         settings.intervalSeconds = 600
+        settings.quitMode = .offendingProcesses
         let restored = try JSONDecoder().decode(HogSettings.self, from: JSONEncoder().encode(settings))
         XCTAssertEqual(restored, settings)
     }
@@ -174,6 +176,7 @@ final class HogCoreChecks {
         """
         let restored = try JSONDecoder().decode(HogSettings.self, from: Data(legacy.utf8))
         XCTAssertFalse(restored.administratorEnabled)
+        XCTAssertEqual(restored.quitMode, .watchedGroup, "Older preferences retain whole-group behavior.")
         XCTAssertEqual(restored.rules.first?.name, "Old App")
         let background = ProcessRecord(identity: ProcessIdentity(pid: 99010, startSeconds: 123, startMicroseconds: 0),
             parentPID: 1, uid: 0, path: "/Library/Application Support/Vendor/Daemon.app/Contents/MacOS/ExampleDaemon",
@@ -422,6 +425,124 @@ final class HogCoreChecks {
         XCTAssertFalse(state.isPaused, "Edited cooldowns apply from the persisted pause timestamp.")
     }
 
+    func testIndividualModeSelectionAndGroupCompatibility() {
+        var settings = HogSettings(); settings.enabled = true; settings.limitBytes = 100
+        settings.quitMode = .offendingProcesses
+        let rule = WatchRule(name: "Hog", targetKind: .process); settings.rules = [rule]
+        let records = [process(rootID, bytes: 200), process(99151, bytes: 80),
+                       process(99152, bytes: 80), process(99153, bytes: 100), process(99154, bytes: nil)]
+        let inventory = ProcessInventory(processes: records, enumerationComplete: true)
+        var selected: [ProcessIdentity] = []
+        let result = CheckEngine.perform(settings: settings, apps: [], retries: [:], enforce: true,
+            inventoryProvider: { inventory }, signal: { sample, _, _, _ in
+                selected = sample.processes.map(\.identity)
+                return TerminationResult(killed: 0, attempted: sample.processes.count)
+            }, wait: { _ in }, verificationPasses: 0)
+        XCTAssertEqual(selected, [records[0].identity], "Only the individual offender is selected, even with same-name siblings and unreadable memory.")
+        XCTAssertEqual(result.attempts.first?.beforeBytes, 200)
+        XCTAssertEqual(result.activity.first?.process?.pid, rootID)
+        XCTAssertEqual(result.samples[0].processes.count, 5, "UI samples retain the full group.")
+        let healthy = ProcessInventory(processes: Array(records[1...3]), enumerationComplete: true)
+        var calls = 0
+        let individual = CheckEngine.perform(settings: settings, apps: [], retries: [:], enforce: true,
+            inventoryProvider: { healthy }, signal: { _, _, _, _ in calls += 1; return TerminationResult(killed: 0, attempted: 3) }, wait: { _ in }, verificationPasses: 0)
+        XCTAssertTrue(individual.attempts.isEmpty)
+        XCTAssertEqual(calls, 0, "A combined total over the limit does not trigger individual mode.")
+        settings.quitMode = .watchedGroup
+        let legacy = CheckEngine.perform(settings: settings, apps: [], retries: [:], enforce: true,
+            inventoryProvider: { healthy }, signal: { sample, _, _, _ in
+                selected = sample.processes.map(\.identity)
+                return TerminationResult(killed: 0, attempted: sample.processes.count)
+            }, wait: { _ in }, verificationPasses: 0)
+        XCTAssertEqual(Set(selected), Set(healthy.processes.map(\.identity)))
+        XCTAssertEqual(legacy.attempts.count, 1)
+    }
+
+    func testIndividualHelpersAndRecoveryScope() {
+        var settings = HogSettings(); settings.enabled = true; settings.limitBytes = 100
+        settings.quitMode = .offendingProcesses
+        let rule = WatchRule(name: "Hog", bundleIdentifier: "test.hog", targetKind: .application); settings.rules = [rule]
+        let main = process(rootID, bytes: 80)
+        let worker = process(99160, parent: rootID, path: "/Applications/Hog.app/Contents/Helpers/Worker", bytes: 200)
+        let sibling = process(99161, parent: rootID, path: worker.path, bytes: 80)
+        let hot = ProcessInventory(processes: [main, worker, sibling], enumerationComplete: true)
+        let gone = ProcessInventory(processes: [main, sibling], enumerationComplete: true)
+        var reads = 0
+        var selected: [ProcessIdentity] = []
+        let exited = CheckEngine.perform(settings: settings, apps: [app()], retries: [:], enforce: true,
+            inventoryProvider: { reads += 1; return reads == 1 ? hot : gone }, signal: { sample, _, _, _ in
+                selected = sample.processes.map(\.identity)
+                return TerminationResult(killed: 1, attempted: 1)
+            }, wait: { _ in }, verificationPasses: 0)
+        XCTAssertEqual(selected, [worker.identity], "The healthy main process and sibling helper must stay running.")
+        XCTAssertEqual(exited.attempts.first?.outcome, .exited, "An existing healthy sibling cannot stand in for a healthy restart.")
+        XCTAssertTrue(exited.retries[rule.id]!.pendingRecovery)
+        let confirmed = CheckEngine.perform(settings: settings, apps: [app()], retries: exited.retries, enforce: true,
+            inventoryProvider: { gone })
+        XCTAssertFalse(confirmed.retries[rule.id]!.pendingRecovery)
+        XCTAssertTrue(confirmed.attempts.isEmpty, "A healthy combined total above the limit is not a new incident in individual mode.")
+        let healthyWorker = process(99162, parent: rootID, path: worker.path, bytes: 80, start: 456)
+        let healthy = ProcessInventory(processes: [main, sibling, healthyWorker], enumerationComplete: true)
+        var previous = RetryState(); previous.failures = 2
+        reads = 0
+        let recovered = CheckEngine.perform(settings: settings, apps: [app()], retries: [rule.id: previous], enforce: true,
+            inventoryProvider: { reads += 1; return reads == 1 ? hot : healthy },
+            signal: { _, _, _, _ in TerminationResult(killed: 1, attempted: 1) }, wait: { _ in }, verificationPasses: 0)
+        XCTAssertEqual(recovered.attempts.first?.outcome, .recovered)
+        XCTAssertEqual(recovered.retries[rule.id]?.failures, 0)
+        let unhealthy = ProcessInventory(processes: [main, sibling, process(99162, parent: rootID, path: worker.path, bytes: 200, start: 456)], enumerationComplete: true)
+        reads = 0
+        let failed = CheckEngine.perform(settings: settings, apps: [app()], retries: [rule.id: previous], enforce: true,
+            inventoryProvider: { reads += 1; return reads == 1 ? hot : unhealthy },
+            signal: { _, _, _, _ in TerminationResult(killed: 1, attempted: 1) }, wait: { _ in }, verificationPasses: 0)
+        XCTAssertEqual(failed.attempts.first?.outcome, .failed)
+        XCTAssertTrue(failed.retries[rule.id]!.isPaused)
+        settings.includeHelpers = false
+        let excluded = CheckEngine.perform(settings: settings, apps: [app()], retries: [:], enforce: true,
+            inventoryProvider: { hot }, signal: { _, _, _, _ in
+                XCTAssertTrue(false, "Excluded helpers must not be signaled.")
+                return TerminationResult(killed: 0, attempted: 0)
+            })
+        XCTAssertTrue(excluded.attempts.isEmpty)
+        var paused = previous; paused.pausedAt = Date()
+        let retained = CheckEngine.perform(settings: settings, apps: [app()], retries: [rule.id: paused], enforce: true,
+            inventoryProvider: { hot })
+        XCTAssertTrue(retained.retries[rule.id]!.isPaused, "Changing quit mode does not discard a persisted pause.")
+    }
+
+    func testIndividualModeLiveSameExecutableSiblings() throws {
+        var fixtures: [Process] = []
+        defer {
+            for fixture in fixtures { if fixture.isRunning { fixture.terminate() } }
+            for fixture in fixtures { fixture.waitUntilExit() }
+        }
+        for megabytes in [80, 2, 2, 2] {
+            let fixture = Process()
+            fixture.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+            fixture.arguments = ["-e", "my $memory = 'x' x (\(megabytes) * 1024 * 1024); sleep 30;"]
+            try fixture.run(); fixtures.append(fixture)
+        }
+        for _ in 0..<100 {
+            let readings = fixtures.compactMap { ProcessScanner.record(for: $0.processIdentifier) }
+            if readings.count == 4 && (readings[0].memoryBytes ?? 0) > 50_000_000
+                && readings.allSatisfy({ $0.path.hasSuffix("/perl") && ($0.memoryBytes ?? 0) > 1_000_000 }) { break }
+            usleep(50_000)
+        }
+        var settings = HogSettings(); settings.enabled = true; settings.limitBytes = 32_000_000
+        settings.quitMode = .offendingProcesses; settings.includeHelpers = false
+        let rule = WatchRule(name: "Disposable siblings \(UUID().uuidString)", targetKind: .application); settings.rules = [rule]
+        let descriptors = try fixtures.map { fixture -> RunningApp in
+            let record = try XCTUnwrap(ProcessScanner.record(for: fixture.processIdentifier))
+            return RunningApp(pid: record.pid, name: rule.name, bundleIdentifier: nil, bundlePath: "", executablePath: record.path)
+        }
+        let report = CheckEngine.perform(settings: settings, apps: descriptors, retries: [:], enforce: true,
+            inventoryProvider: { ProcessInventory(processes: fixtures.compactMap { ProcessScanner.record(for: $0.processIdentifier) }, enumerationComplete: true) })
+        XCTAssertEqual(report.attempts.first?.signaled, 1)
+        fixtures[0].waitUntilExit()
+        XCTAssertEqual(fixtures[0].terminationStatus, SIGKILL)
+        XCTAssertTrue(fixtures.dropFirst().allSatisfy(\.isRunning), "All smaller instances of the very same executable stay alive.")
+    }
+
     func testReadOnlySystemProcessDiscovery() throws {
         let visible = ProcessScanner.visibleProcessRecords(allowedUserIDs: [getuid(), 0])
         XCTAssertTrue(visible.contains { $0.pid == getpid() }, "Read-only process metadata should include this test process.")
@@ -465,6 +586,11 @@ final class HogCoreChecks {
         target.arguments = ["-e", "my $memory = 'x' x (80 * 1024 * 1024); sleep 30;"]
         try target.run()
         defer { if target.isRunning { target.terminate() }; target.waitUntilExit() }
+        let companion = Process()
+        companion.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        companion.arguments = ["-e", "my $memory = 'x' x (2 * 1024 * 1024); sleep 30;"]
+        try companion.run()
+        defer { if companion.isRunning { companion.terminate() }; companion.waitUntilExit() }
         var record: ProcessRecord?
         for _ in 0..<100 {
             record = ProcessScanner.record(for: target.processIdentifier)
@@ -474,10 +600,21 @@ final class HogCoreChecks {
         let measured = try XCTUnwrap(record)
         var settings = HogSettings()
         settings.enabled = true; settings.useAdministratorHelper = true; settings.limitBytes = 32_000_000
+        settings.quitMode = .offendingProcesses; settings.includeHelpers = false
         let rule = WatchRule(name: "MHK XPC Fixture \(UUID().uuidString)", targetKind: .application)
         settings.rules = [rule]
         let descriptor = RunningApp(pid: measured.pid, name: rule.name, bundleIdentifier: nil, bundlePath: "", executablePath: measured.path)
+        let companionRecord = try XCTUnwrap(ProcessScanner.record(for: companion.processIdentifier))
+        let companionDescriptor = RunningApp(pid: companionRecord.pid, name: rule.name, bundleIdentifier: nil, bundlePath: "", executablePath: companionRecord.path)
         let remote = try XCTUnwrap(connection.remoteObjectProxyWithErrorHandler { _ in } as? HogHelperProtocol)
+        let staleReply = CheckReply()
+        let staleRequest = HelperCheckRequest(policy: HelperPolicy(revision: 1, settings: settings), apps: [descriptor], enforce: true)
+        var staleObject = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(staleRequest)) as? [String: Any])
+        staleObject["version"] = HelperConstants.protocolVersion - 1
+        remote.performCheck(try JSONSerialization.data(withJSONObject: staleObject)) { staleReply.finish(data: $0, error: $1) }
+        XCTAssertEqual(staleReply.semaphore.wait(timeout: .now() + 5), .success)
+        XCTAssertTrue(staleReply.error != nil, "Older helper policies must be rejected before enforcement.")
+        XCTAssertTrue(target.isRunning)
         var pausedState = RetryState(); pausedState.failures = 3; pausedState.pausedAt = Date()
         let pausedReply = CheckReply()
         let pausedRequest = HelperCheckRequest(policy: HelperPolicy(revision: 1, settings: settings, retries: [rule.id: pausedState]), apps: [descriptor], enforce: true)
@@ -497,7 +634,7 @@ final class HogCoreChecks {
         XCTAssertTrue(alertReport.inventory.processes.contains { $0.identity == measured.identity })
         XCTAssertTrue(alertReport.attempts.isEmpty)
         XCTAssertTrue(target.isRunning, "All-process inventory through XPC is read-only, even with enforce requested.")
-        let request = HelperCheckRequest(policy: HelperPolicy(revision: 3, settings: settings), apps: [descriptor], enforce: true)
+        let request = HelperCheckRequest(policy: HelperPolicy(revision: 3, settings: settings), apps: [descriptor, companionDescriptor], enforce: true)
         let result = CheckReply()
         let proxy = connection.remoteObjectProxyWithErrorHandler { error in result.finish(data: nil, error: String(describing: error as NSError)) } as? HogHelperProtocol
         try XCTUnwrap(proxy).performCheck(JSONEncoder().encode(request)) { result.finish(data: $0, error: $1) }
@@ -507,6 +644,7 @@ final class HogCoreChecks {
         XCTAssertEqual(result.error, nil)
         XCTAssertEqual(delegate.acceptedConnections, 1)
         let response = try JSONDecoder().decode(HelperCheckResponse.self, from: XCTUnwrap(result.data))
+        XCTAssertEqual(response.version, HelperConstants.protocolVersion)
         XCTAssertEqual(response.activity.count, 1)
         let outcome = try XCTUnwrap(response.attempts.first?.outcome)
         XCTAssertTrue(outcome == .exited || outcome == .recovered)
@@ -516,6 +654,7 @@ final class HogCoreChecks {
         target.waitUntilExit()
         XCTAssertEqual(target.terminationReason, .uncaughtSignal)
         XCTAssertEqual(target.terminationStatus, SIGKILL)
+        XCTAssertTrue(companion.isRunning, "The authenticated helper leaves a smaller same-executable sibling running.")
         let deniedListener = NSXPCListener.anonymous()
         let wrongRequirement = "cdhash H\"\(String(repeating: "0", count: 40))\""
         let deniedDelegate = CheckListener(requirement: wrongRequirement)
@@ -616,5 +755,8 @@ run("Retry cap, persistence, cancellation, and watcher isolation", checks.testRe
 run("Healthy service restart and later independent leak", checks.testHealthyRestartAndLaterLeak)
 run("Pending exit and continuously unhealthy relaunch", checks.testExitPendingAndUnhealthyRelaunch)
 run("Cooldown and protected-process skips", checks.testCooldownAndProtectedSkips)
+run("Individual process selection and whole-group compatibility", checks.testIndividualModeSelectionAndGroupCompatibility)
+run("Individual helpers, replacement recovery, and preserved pauses", checks.testIndividualHelpersAndRecoveryScope)
+run("LIVE individual offender and same-executable siblings", checks.testIndividualModeLiveSameExecutableSiblings)
 print("\(assertions) assertions, \(failures) failures")
 exit(failures == 0 ? 0 : 1)

@@ -27,6 +27,7 @@ public enum CheckEngine {
         var activity: [ActivityEntry] = []
         var attempts: [QuitAttempt] = []
         var originals: [UUID: MemorySample] = [:]
+        var targets: [UUID: MemorySample] = [:]
         var handled = Set<ProcessIdentity>()
 
         func event(_ kind: ActivityKind, rule: WatchRule, sample: MemorySample, state: RetryState) -> ActivityEntry {
@@ -36,7 +37,7 @@ public enum CheckEngine {
             case .resumed: message = "Cooldown finished; watcher resumed with a fresh attempt count."
             default: message = "Memory recovered below the limit or the process remained exited. Attempt count reset."
             }
-            return ActivityEntry(app: rule.name, bytes: sample.bytes, message: message,
+            return ActivityEntry(app: rule.name, bytes: sample.measuredBytes(mode: settings.quitMode), message: message,
                 succeeded: kind != .paused, kind: kind, process: sample.roots.first,
                 ruleID: rule.id, limitBytes: settings.limitBytes)
         }
@@ -50,24 +51,27 @@ public enum CheckEngine {
             }
             retries[rule.id] = state
             guard enforce, settings.enabled, !state.isPaused, shouldContinue(),
-                  sample.shouldTerminate(enabled: true, limitBytes: settings.limitBytes),
-                  sample.roots.contains(where: { !handled.contains($0.identity) }) else { continue }
-            if let reason = sample.processes.compactMap({
+                  sample.shouldTerminate(enabled: true, limitBytes: settings.limitBytes, mode: settings.quitMode) else { continue }
+            let candidates = sample.terminationTargets(limitBytes: settings.limitBytes, mode: settings.quitMode)
+            let selected = candidates.selecting(candidates.processes.filter { !handled.contains($0.identity) })
+            guard !selected.processes.isEmpty else { continue }
+            if let reason = selected.processes.compactMap({
                 ProcessTerminator.refusalReason(for: $0, allowedUserIDs: killUIDs, protectedPIDs: protectedPIDs)
             }).first {
                 if state.lastIssue != reason {
-                    activity.append(ActivityEntry(app: rule.name, bytes: sample.bytes,
+                    activity.append(ActivityEntry(app: rule.name, bytes: selected.measuredBytes(mode: settings.quitMode),
                         message: "Quit skipped: \(reason). No retry used.", succeeded: false,
-                        kind: .skipped, process: sample.roots.first, ruleID: rule.id, limitBytes: settings.limitBytes))
+                        kind: .skipped, process: selected.processes.first, ruleID: rule.id, limitBytes: settings.limitBytes))
                 }
                 state.lastIssue = reason; retries[rule.id] = state
                 continue
             }
-            let result = signal(sample, killUIDs, protectedPIDs, shouldContinue)
-            handled.formUnion(sample.processes.map(\.identity))
+            let result = signal(selected, killUIDs, protectedPIDs, shouldContinue)
+            handled.formUnion(selected.processes.map(\.identity))
             guard result.attempted > 0 else { continue }
             originals[rule.id] = sample
-            attempts.append(QuitAttempt(ruleID: rule.id, beforeBytes: sample.bytes,
+            targets[rule.id] = selected
+            attempts.append(QuitAttempt(ruleID: rule.id, beforeBytes: selected.measuredBytes(mode: settings.quitMode),
                 attempted: result.attempted, signaled: result.killed,
                 outcome: result.cancelled ? .cancelled : .unavailable,
                 detail: result.failures.joined(separator: "; ")))
@@ -83,13 +87,14 @@ public enum CheckEngine {
                 if pass > 0 { wait(250_000) }
                 let inventory = inventoryProvider()
                 for i in attempts.indices where attempts[i].outcome != .recovered && attempts[i].outcome != .cancelled {
-                    guard let original = originals[attempts[i].ruleID],
+                    guard let original = originals[attempts[i].ruleID], let selected = targets[original.ruleID],
                           let rule = settings.rules.first(where: { $0.id == original.ruleID }) else { continue }
                     let descriptors = ProcessScanner.recoveryApps(original: apps, sample: original, inventory: inventory)
                     let sample = ProcessScanner.report(rules: [rule], apps: descriptors, includeHelpers: settings.includeHelpers,
                         allowedUserIDs: watchUIDs, inventory: inventory).samples[0]
-                    attempts[i].outcome = RecoveryVerification.classify(sample,
-                        inventoryComplete: inventory.enumerationComplete, limitBytes: settings.limitBytes)
+                    let scope = RecoveryVerification.scope(sample, original: original, targets: selected, mode: settings.quitMode)
+                    attempts[i].outcome = RecoveryVerification.classify(scope,
+                        inventoryComplete: inventory.enumerationComplete, limitBytes: settings.limitBytes, mode: settings.quitMode)
                     if let index = samples.firstIndex(where: { $0.ruleID == sample.ruleID }) { samples[index] = sample }
                 }
                 if attempts.allSatisfy({ $0.outcome == .recovered || $0.outcome == .cancelled }) { break }
@@ -98,7 +103,7 @@ public enum CheckEngine {
 
         for attempt in attempts {
             guard let rule = settings.rules.first(where: { $0.id == attempt.ruleID }),
-                  let original = originals[rule.id] else { continue }
+                  let original = originals[rule.id], let selected = targets[rule.id] else { continue }
             var state = retries[rule.id] ?? RetryState()
             let paused = state.record(attempt, settings: settings, now: now)
             retries[rule.id] = state
@@ -121,9 +126,12 @@ public enum CheckEngine {
                 message = "Quit interrupted by changed settings. The retry state was not advanced."
                 kind = .quit
             }
+            let scopeDetail = settings.quitMode == .offendingProcesses
+                ? " Individual-process mode; selected PID\(selected.processes.count == 1 ? "" : "s") \(selected.processes.map { String($0.pid) }.joined(separator: ", "))."
+                : ""
             activity.append(ActivityEntry(app: rule.name, bytes: attempt.beforeBytes,
-                message: message + (attempt.detail.isEmpty ? "" : " " + attempt.detail), succeeded: attempt.outcome == .recovered,
-                kind: kind, process: original.roots.first, ruleID: rule.id, limitBytes: settings.limitBytes))
+                message: message + scopeDetail + (attempt.detail.isEmpty ? "" : " " + attempt.detail), succeeded: attempt.outcome == .recovered,
+                kind: kind, process: selected.processes.max { ($0.memoryBytes ?? 0) < ($1.memoryBytes ?? 0) }, ruleID: rule.id, limitBytes: settings.limitBytes))
             if paused { activity.append(event(.paused, rule: rule, sample: original, state: state)) }
         }
         if enforce && settings.enabled && !shouldContinue() {

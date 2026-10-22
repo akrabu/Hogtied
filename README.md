@@ -4,19 +4,31 @@
 
 A small native macOS menu bar app that keeps selected memory hogs under control. It can also **log and notify when any readable process exceeds your limit**, without automatically quitting unwatched processes.
 
-**Version 1.2.0 · macOS 13+ · 1 GB · every 5 minutes**
+**Version 1.3.0 · macOS 13+ · 1 GB · every 5 minutes**
 
 ## Get started
 
 1. Put **Hogtied.app** in `/Applications` and open it.
 2. Add applications, select a running app, or enter an exact process name from Activity Monitor. An optional executable path distinguishes identically named processes.
 3. Set the memory limit and interval, pressing **Apply** for each.
-4. Enable **Automatically quit watched apps over the limit**, **Alert on any process over the limit**, or both.
-5. Enable **Launch at login** to run Hogtied when you sign in. Any approval required by macOS is shown in the app.
+4. Choose **Quit mode → Only processes over the limit** to quit individual offenders while leaving smaller instances running. **Whole watched group** retains the original combined-memory behavior and remains the default for existing and new settings.
+5. Enable **Automatically quit watched apps over the limit**, **Alert on any process over the limit**, or both.
+6. Enable **Launch at login** to run Hogtied when you sign in. Any approval required by macOS is shown in the app.
 
 Closing Settings leaves the pig in the menu bar. The menu provides both monitoring switches, Check now, Activity, Settings, and Quit. Enabling automatic quitting makes an immediate check. Adding or editing a target, changing limits, or resuming an entry updates the preview and leaves new enforcement to the next check. **Check now** enforces the limit only when automatic quitting is enabled and honors per-entry pauses.
 
 Force-quitting can lose unsaved changes. Add only apps you want Hogtied to be allowed to force-quit.
+
+## Quit mode
+
+The **Quit mode** setting applies to all watched entries and to both local and administrator execution:
+
+- **Whole watched group:** add the matching processes' footprints together, including helpers when selected. If the total exceeds the limit, quit the attributed group.
+- **Only processes over the limit:** compare each matching PID separately. Signal only the processes whose own measured footprint exceeds the limit. Healthy same-name instances, parents, and helpers stay running. Unknown memory readings are never selected for termination. Helpers remain eligible only when **Include helper and child processes** is enabled.
+
+For example, with a 512 MB limit and four matching processes at 600, 200, 100, and 50 MB, individual mode quits only the 600 MB process. At 350, 200, 100, and 50 MB, it quits none. In individual mode, the menu and watch list display **Max** for the largest process instead of a combined total; the Activity entry identifies the selected PID(s).
+
+Changing quit mode takes effect at the next check and retains per-entry pauses. Retry limits still apply to each watched entry, with one batch of eligible individual offenders per check. During recovery verification, a pre-existing healthy sibling does not count as a healthy replacement for a signaled process. A newly measured replacement below the individual limit does, even when the whole group's combined footprint remains above the limit. Quitting an application process can also cause the application itself to shut down its helpers; Hogtied only sends signals to the selected PIDs in individual mode.
 
 ## All-process alerts and Activity
 
@@ -63,7 +75,7 @@ The supplied app uses ad hoc signing for local use. The installer is not Develop
 
 Hogtied retains `local.memoryhogkiller.app`, the existing preference domain, and the helper's service/trust locations for compatibility. Watch entries, prior settings, and old activity records are preserved; the new alert switch and automatic cooldown default to off. Startup registration is refreshed for the renamed app when previously enabled. Review its status after moving the app.
 
-Replace the older application with Hogtied and use the matching 1.2.0 administrator installer if you use privileged mode. Keep a single running controller.
+Replace the older application with Hogtied and use the matching 1.3.0 administrator installer if you use privileged mode. Keep a single running controller. Upgrading from 1.2.0 preserves your watch list, limit, interval, monitoring switches, cooldown, history, and paused entries; select individual-process mode explicitly if desired.
 
 ## Memory accounting and matching
 
@@ -71,7 +83,7 @@ Hogtied uses physical memory footprint (`ri_phys_footprint`), which includes com
 
 Names match completely and without regard to capitalization. `Safari` and `Safari.app` match; partial names and wildcards do not. Chosen application bundles match by bundle identifier. Process entries can match exact executable names and optionally pin an absolute executable path.
 
-Watched entries sum matching main processes and, when enabled, executables in their bundles and descendants. Separate foreground applications are excluded from helper attribution. Multiple matching instances share the watched entry's limit. Shared memory can be counted more than once when process footprints are summed. All-process alerts always measure individual processes.
+Watched entries attribute matching main processes and, when enabled, executables in their bundles and descendants. Separate foreground applications are excluded from helper attribution. Whole-group mode sums these processes; individual mode compares each footprint separately. Shared memory can be counted more than once when footprints are summed. All-process alerts always measure individual processes, regardless of quit mode.
 
 The threshold is strictly greater than the configured amount: exactly 1 GB does not exceed a 1 GB limit. A GB is 1,000,000,000 bytes. Limits accept 1 MB to 1,000 GB; intervals accept whole seconds from 5 seconds to 24 hours.
 
@@ -90,7 +102,7 @@ open dist/Hogtied.app
 
 Use `HOGTIED_BUILD_DIR` to choose a scratch directory; the older `MHK_BUILD_DIR` variable remains supported. The scripts use SwiftPM's native build system to support Command Line Tools without a full Xcode installation. macOS CI runs the checks, builds the app and matching helper package, and uploads the resulting artifacts.
 
-Tests cover migration, matching and helper attribution, spike suppression/re-arming, notification denial policy, process promotion, retry budgets, healthy restarts, unhealthy relaunches, cooldowns, cancellation, and protected targets. Native integration checks inspect process metadata and authenticated XPC and terminate only disposable processes created by the tests. Run them outside a restrictive command sandbox; restricted process discovery or XPC will otherwise cause those checks to fail.
+Tests cover migration, both quit modes, matching and helper attribution, spike suppression/re-arming, notification denial policy, process promotion, retry budgets, healthy restarts, unhealthy relaunches, cooldowns, cancellation, and protected targets. Native integration checks inspect process metadata and authenticated XPC, reject outdated protocol requests, and terminate only disposable processes created by the tests. Same-executable sibling tests verify individual mode in local and helper execution. Run them outside a restrictive command sandbox; restricted process discovery or XPC will otherwise cause those checks to fail.
 
 Source layout:
 

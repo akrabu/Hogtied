@@ -84,7 +84,8 @@ struct MenuPanel: View {
         guard let sample = model.samples[rule.id] else { return "—" }
         guard sample.isRunning else { return "No visible match" }
         guard sample.isMeasurable else { return "Needs access" }
-        return (sample.unavailableCount > 0 ? "≥ " : "") + MemoryText.format(sample.bytes)
+        return (model.settings.quitMode == .offendingProcesses ? "Max " : "")
+            + (sample.unavailableCount > 0 ? "≥ " : "") + MemoryText.format(sample.measuredBytes(mode: model.settings.quitMode))
     }
 }
 
@@ -109,7 +110,7 @@ struct SettingsView: View {
                     Text("Keep the memory hogs in check.").font(.system(size: 13)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("1.2.0").font(.system(size: 11)).foregroundStyle(.tertiary)
+                Text("1.3.0").font(.system(size: 11)).foregroundStyle(.tertiary)
             }.padding(24)
             Picker("View", selection: $model.settingsTab) { Text("Watch list").tag(0); Text("Activity").tag(1) }
                 .pickerStyle(.segmented).labelsHidden().frame(width: 240).padding(.bottom, 18)
@@ -169,8 +170,19 @@ struct SettingsView: View {
                         }
                         Spacer(minLength: 0)
                     }
+                    Picker("Quit mode", selection: Binding(get: { model.settings.quitMode }, set: { value in model.update { $0.quitMode = value } })) {
+                        Text("Whole watched group").tag(QuitMode.watchedGroup)
+                        Text("Only processes over the limit").tag(QuitMode.offendingProcesses)
+                    }.frame(maxWidth: 490, alignment: .leading).font(.system(size: 12))
+                    Text(model.settings.quitMode == .offendingProcesses
+                         ? "Compare each process separately. Quit only PIDs over the limit; smaller processes with the same name stay running. The watch list shows the largest process."
+                         : "Add up each watched entry’s processes. If their combined memory exceeds the limit, quit the whole group.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Toggle("Include helper and child processes for watched targets", isOn: Binding(get: { model.settings.includeHelpers }, set: { value in model.update { $0.includeHelpers = value } })).font(.system(size: 12))
-                    Text("Watched entries share a limit with their helpers. All-process alerts measure each process individually.").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(model.settings.quitMode == .offendingProcesses
+                         ? "Included helpers are also checked individually. All-process alerts always measure each process separately."
+                         : "Watched entries share a limit with their helpers. All-process alerts measure each process individually.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
                 }.card()
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Recovery & retries").font(.system(size: 14, weight: .semibold))
@@ -335,7 +347,9 @@ struct SettingsView: View {
     }
     private func sampleUsage(_ rule: WatchRule) -> String {
         guard let sample = model.samples[rule.id], sample.isRunning else { return "—" }
-        return sample.isMeasurable ? (sample.unavailableCount > 0 ? "≥ " : "") + MemoryText.format(sample.bytes) : "Unavailable"
+        guard sample.isMeasurable else { return "Unavailable" }
+        return (model.settings.quitMode == .offendingProcesses ? "Max " : "")
+            + (sample.unavailableCount > 0 ? "≥ " : "") + MemoryText.format(sample.measuredBytes(mode: model.settings.quitMode))
     }
     private func sampleDetail(_ rule: WatchRule) -> String {
         guard let sample = model.samples[rule.id] else { return "Waiting for a check" }
@@ -343,7 +357,9 @@ struct SettingsView: View {
         if sample.requiresAdministratorAccess && !(model.settings.administratorEnabled && model.helperAvailable) { return sample.isRootOwned ? "Running as root · administrator helper required" : "Additional process access required" }
         if sample.unavailableCount > 0 { return "\(sample.processes.count) processes · some memory unavailable" }
         if model.retries[rule.id]?.pendingRecovery == true { return "Awaiting the next recovery check" }
+        let over = sample.processes.filter { ($0.memoryBytes ?? 0) > model.settings.limitBytes }.count
         return "\(sample.processes.count) processes" + (sample.isRootOwned ? " · root" : "")
+            + (model.settings.quitMode == .offendingProcesses ? " · \(over) over limit" : "")
     }
     private func loadFields() {
         limitUnit = model.settings.limitBytes >= 1_000_000_000 ? 1_000_000_000 : 1_000_000
