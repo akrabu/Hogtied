@@ -16,6 +16,7 @@ jobs:
         run: |
           ./Scripts/build.sh dist
           ./Scripts/package-admin.sh dist/Hogtied.app dist
+          ./Scripts/package-dmg.sh dist/Hogtied.app dist
           ditto -c -k --sequesterRsrc --keepParent dist/Hogtied.app dist/Hogtied.zip
       - uses: actions/upload-artifact@v7.0.2
         with:
@@ -23,4 +24,5 @@ jobs:
           path: |
             dist/Hogtied.zip
             dist/Hogtied Admin Helper.pkg
+            dist/*.dmg
           if-no-files-found: error

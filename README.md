@@ -8,6 +8,8 @@ A small native macOS menu bar app that keeps selected memory hogs under control.
 
 ## Get started
 
+Download the disk image for your Mac from [GitHub Releases](https://github.com/akrabu/Hogtied/releases). The DMG contains the app, an Applications shortcut, the matching optional administrator installer, and instructions. Quit any older running copy before replacing it. For ordinary installation, drag the app into Applications; for privileged mode, run the included helper installer instead. Open the installed app, then eject the disk image. Filenames identify the architecture: `arm64` for Apple silicon and `x86_64` for Intel.
+
 1. Put **Hogtied.app** in `/Applications` and open it.
 2. Add applications, select a running app, or enter an exact process name from Activity Monitor. An optional executable path distinguishes identically named processes.
 3. Set the memory limit and interval, pressing **Apply** for each.
@@ -97,10 +99,11 @@ Requires macOS 13 or later and Apple's Command Line Tools with Swift 5.9 or newe
 ./Scripts/test.sh
 ./Scripts/build.sh dist
 ./Scripts/package-admin.sh dist/Hogtied.app dist
+./Scripts/package-dmg.sh dist/Hogtied.app dist
 open dist/Hogtied.app
 ```
 
-Use `HOGTIED_BUILD_DIR` to choose a scratch directory; the older `MHK_BUILD_DIR` variable remains supported. The scripts use SwiftPM's native build system to support Command Line Tools without a full Xcode installation. macOS CI runs the checks, builds the app and matching helper package, and uploads the resulting artifacts.
+Use `HOGTIED_BUILD_DIR` to choose a scratch directory; the older `MHK_BUILD_DIR` variable remains supported. The scripts use SwiftPM's native build system to support Command Line Tools without a full Xcode installation. macOS CI runs the checks, builds the app, matching helper package, and verified DMG, and uploads the resulting artifacts. DMG filenames include the app version and architecture.
 
 Tests cover migration, both quit modes, matching and helper attribution, spike suppression/re-arming, notification denial policy, process promotion, retry budgets, healthy restarts, unhealthy relaunches, cooldowns, cancellation, and protected targets. Native integration checks inspect process metadata and authenticated XPC, reject outdated protocol requests, and terminate only disposable processes created by the tests. Same-executable sibling tests verify individual mode in local and helper execution. Run them outside a restrictive command sandbox; restricted process discovery or XPC will otherwise cause those checks to fail.
 

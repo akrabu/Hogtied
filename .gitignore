@@ -7,4 +7,5 @@ outputs/
 *.log
 *.zip
 *.pkg
+*.dmg
 *.xcuserstate
