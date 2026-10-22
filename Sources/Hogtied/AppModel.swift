@@ -164,12 +164,11 @@ final class AppModel: ObservableObject {
 
     func watchedRule(for process: ProcessRecord) -> WatchRule? {
         settings.rules.first { rule in
-            if rule.matches(process) { return true }
-            if samples[rule.id]?.processes.contains(where: { $0.identity == process.identity || (!$0.path.isEmpty && $0.path == process.path) }) == true { return true }
+            var executable: String?
             if let id = rule.bundleIdentifier, let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
-                return process.path.hasPrefix(url.path + "/")
+                executable = Bundle(url: url)?.executableURL?.path
             }
-            return false
+            return WatchPromotion.isCovered(process, by: rule, sample: samples[rule.id], applicationExecutablePath: executable)
         }
     }
     func promotionReason(_ process: ProcessRecord) -> String? {

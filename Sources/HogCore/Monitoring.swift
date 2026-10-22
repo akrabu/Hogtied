@@ -129,6 +129,18 @@ public struct CheckReport: Codable, Sendable {
 }
 
 public enum WatchPromotion {
+    public static func isCovered(_ process: ProcessRecord, by rule: WatchRule,
+                                 sample: MemorySample?, applicationExecutablePath: String? = nil) -> Bool {
+        if rule.matches(process) { return true }
+        if sample?.processes.contains(where: { $0.identity == process.identity }) == true { return true }
+        if !process.path.isEmpty {
+            if sample?.roots.contains(where: { $0.path == process.path }) == true { return true }
+            if applicationExecutablePath == process.path { return true }
+        }
+        // An attributed helper's executable can also be used by unrelated
+        // processes. A path match against helpers alone is not watch coverage.
+        return false
+    }
     public static func refusalReason(_ process: ProcessRecord, userID: UInt32, controllerPID: Int32) -> String? {
         if process.uid != userID && process.uid != 0 { return "another user's process is outside the helper's scope" }
         if process.path.hasSuffix("/Contents/MacOS/Hogtied") || process.path.hasSuffix("/local.memoryhogkiller.helper") {
